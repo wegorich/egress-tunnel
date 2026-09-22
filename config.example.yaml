@@ -1,0 +1,64 @@
+# Copy to config.yaml and fill in for your machine.
+
+interface: utun11          # macOS interface name, must be in the utun<N> format
+
+vps:
+  endpoint: "HUB_HOST:51820"      # your hub's public address (IP or DNS) and WireGuard port
+  peer_public_key: "HUB_PUBLIC_KEY"   # the hub interface's public key (wg/awg show <iface> public-key)
+  hub_cidr: "10.0.0.0/24"   # the hub's network on the VPS
+
+  # Optional. When set, install.sh runs `systemctl enable --now <unit>` on the
+  # hub as part of the run. Leave it out and the hub is left alone, which is
+  # the right default for a shared server.
+  # hub_systemd_unit: "wg-quick@wg0"      # awg-quick@awg0 for an obfuscated hub
+
+  # Optional. Omit this whole block to run plain (unobfuscated) WireGuard -
+  # the default above. Uncomment and fill in to run through a hub interface
+  # with AmneziaWG obfuscation instead: junk packets and padded/
+  # substituted headers so the tunnel isn't fingerprinted as WireGuard by
+  # DPI. Needs a hub endpoint that's actually running amneziawg-go/the
+  # AmneziaWG kernel module with matching parameters - a plain WireGuard
+  # peer will not complete the handshake against these.
+  # obfuscation:
+  #   jc: <int>       # junk packet count before the handshake
+  #   jmin: <int>     # junk packet size range (bytes)
+  #   jmax: <int>
+  #   s1: <int>       # handshake-packet padding (bytes)
+  #   s2: <int>
+  #   h1: <uint32>    # 4 distinct magic header values, must match the hub exactly.
+  #   h2: <uint32>    # Generate your own; published example numbers are themselves
+  #   h3: <uint32>    # a fingerprint once enough deployments copy them.
+  #   h4: <uint32>
+
+client:
+  internal_ip: "10.0.0.2"   # a free IP in hub_cidr — agree on it before adding the peer
+
+routes:
+  # Domains that go through the tunnel. Re-resolved every
+  # healthcheck.resolve_interval_sec seconds — no static pinning, so IPs
+  # can't go stale.
+  domains:
+    - api.anthropic.com
+    - claude.ai
+    - claude.com
+    - platform.claude.com
+    - bridge.claudeusercontent.com
+    - api.openai.com
+    - auth.openai.com
+    - chatgpt.com
+
+healthcheck:
+  probe_url: "https://api.anthropic.com/"
+  probe_interval_sec: 20
+  # WireGuard renews the handshake on its own REKEY_AFTER_TIME timer (120s) and
+  # only treats a session as dead at REJECT_AFTER_TIME (180s). PersistentKeepalive
+  # holds the NAT mapping open; it does NOT refresh the handshake, so a threshold
+  # below 180 fires on a perfectly healthy tunnel. Measured 2026-09-21: the age
+  # climbs to 120s every cycle, so the old 75 spent ~45s of every cycle calling a
+  # live channel dead, ripping out the AI-domain routes and leaking that traffic
+  # to the blocked direct path. 180 is the only age at which the channel is
+  # genuinely gone.
+  handshake_timeout_sec: 180
+  fallback_after_failures: 3     # this many consecutive failures -> routes are removed
+  recovery_after_successes: 3    # this many consecutive successes -> routes are restored
+  resolve_interval_sec: 300      # re-resolve domains every 5 minutes

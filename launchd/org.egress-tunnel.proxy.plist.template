@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>org.egress-tunnel.proxy</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__AUTOSSH__</string>
+		<string>-M</string>
+		<string>0</string>
+		<string>-N</string>
+		<string>-T</string>
+		<string>-o</string>
+		<string>ControlPath=none</string>
+		<string>-o</string>
+		<string>ServerAliveInterval=15</string>
+		<string>-o</string>
+		<string>ServerAliveCountMax=3</string>
+		<string>-o</string>
+		<string>ExitOnForwardFailure=yes</string>
+		<string>-o</string>
+		<string>StrictHostKeyChecking=accept-new</string>
+		<string>-o</string>
+		<string>ConnectTimeout=20</string>
+		<string>-L</string>
+		<string>127.0.0.1:__PORT__:127.0.0.1:__PORT__</string>
+		<string>__HUB__</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>AUTOSSH_GATETIME</key>
+		<string>0</string>
+		<key>AUTOSSH_POLL</key>
+		<string>30</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+	<key>StandardOutPath</key>
+	<string>__HOME__/Library/Logs/ai-egress-proxy.log</string>
+	<key>StandardErrorPath</key>
+	<string>__HOME__/Library/Logs/ai-egress-proxy.err</string>
+</dict>
+</plist>

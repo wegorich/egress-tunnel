@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>org.egress-tunnel.interface</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__INSTALL_DIR__/bin/amneziawg-go</string>
+		<string>-f</string>
+		<string>__INTERFACE__</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/var/log/egress-tunnel-interface.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/var/log/egress-tunnel-interface.err.log</string>
+</dict>
+</plist>
