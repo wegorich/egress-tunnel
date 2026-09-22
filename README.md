@@ -248,6 +248,25 @@ values included), so a stale profile cannot outlive the switch.
 
 ---
 
+## Phones and other clients
+
+The smart part of this project (per-domain routing with CDN re-resolution) is a
+macOS daemon and does not run on a phone. But the hub is just WireGuard, so a
+phone can still use it - with a coarser split:
+
+- **Full tunnel (simplest).** Install the **WireGuard** app (or **AmneziaWG** if
+  the hub interface is obfuscated - the stock WireGuard app cannot do
+  obfuscation), add a peer config pointing at the hub, and route everything
+  through it. Works in a minute.
+- **Coarse split.** Set the peer's `AllowedIPs` to specific ranges instead of
+  `0.0.0.0/0`. This is static: a mobile client pins IP ranges, not domains, and
+  cannot re-resolve, so for CDN-fronted services (most AI APIs) it drifts out of
+  date - the exact leak this project's macOS daemon exists to avoid. Use it only
+  for stable, non-CDN destinations.
+
+Either way, register the phone as its own `[Peer]` on the hub (its own key, its
+own `internal_ip`), the same as a laptop.
+
 ## Design notes and hard-won rules
 
 These each cost a real outage to learn. If you are extending this, do not undo
