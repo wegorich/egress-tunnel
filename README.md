@@ -18,10 +18,13 @@ near-native throughput and latency. **Proxy mode** is there for networks where
 WireGuard's UDP transport genuinely cannot get through; it costs latency and
 most of the throughput, but it only needs `ssh <hub>` to work.
 
-Only the domains listed in `config.yaml` cross the hub. They are re-resolved
-every few minutes and their routes are pinned per-IP, so CDN-fronted services
-(most AI APIs sit behind Cloudflare) never leak around the tunnel when their
-address rotates.
+Only the domains listed in `config.yaml` cross the hub. Cloudflare rotates the
+addresses of those names every few minutes, faster than a per-IP route can
+follow: the app still holds the previous answer after that route is gone, and
+the packet leaves by the home line. The published Cloudflare networks (and
+Anthropic's own block) are therefore pinned whole, the way a VPN pins a
+destination network. Addresses outside those networks still get a host route,
+which is kept for a while after DNS drops it.
 
 ---
 
@@ -30,10 +33,11 @@ address rotates.
 A hub VPS runs one WireGuard interface. Each client runs two root LaunchDaemons:
 
 - `amneziawg-go` holding a `utun` interface, and
-- a Python watchdog (`egress_tunnel.py watch`) that re-resolves the configured
-  domains on a timer, pins one host route per resolved IP into that interface,
-  removes those routes when the channel is genuinely dead (falling back to the
-  normal path), and restores them on recovery.
+- a Python watchdog (`egress_tunnel.py watch`) that pins the configured CDN
+  networks into that interface, re-resolves the domains on a timer, and adds a
+  host route only for addresses that fall outside those networks. It removes
+  the routes when the channel is genuinely dead (falling back to the normal
+  path) and restores them on recovery.
 
 The client binary is [`amneziawg-go`](https://github.com/amnezia-vpn/amneziawg-go)
 in both modes, because it is a strict superset of `wireguard-go`: given a
@@ -68,8 +72,9 @@ network starts blocking the protocol itself.
   added. For CDN-fronted domains the IP rotates, the route goes stale, and
   traffic silently leaks around the tunnel. Confirmed upstream:
   [amnezia-vpn/amnezia-client#927](https://github.com/amnezia-vpn/amnezia-client/issues/927).
-  `egress-tunnel` re-resolves on every cycle and updates routes itself, so
-  nothing goes stale.
+  `egress-tunnel` pins Cloudflare's published networks, so an address rotating
+  inside them is already routed, and re-resolves on every cycle for anything
+  outside those networks.
 - **NetBird** solves a different problem (mesh access to servers), with no
   reason to be faster specifically for AI egress.
 

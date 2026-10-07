@@ -19,7 +19,11 @@ statically when a domain is added (see github.com/amnezia-vpn/amnezia-client
 issue #927) — for CDN-fronted domains (Cloudflare-fronted APIs) the IP
 changes, the route goes stale, and traffic silently leaks around the tunnel.
 This daemon re-resolves domains on every cycle and updates routes when the
-IP changes.
+IP changes. Cloudflare also rotates inside a published network faster than a
+per-address route can follow: the app still holds the previous answer after
+the route is gone, and that packet leaves by the home line. Those networks
+are pinned whole (`routes.prefixes`), the way a VPN pins a destination
+network rather than one address.
 
 Usage:
     egress_tunnel.py up       # one-shot interface + route setup, then exit
@@ -243,6 +247,61 @@ def delete_host_route(ip: str, interface: str):
     run(["route", "delete", "-host", ip], check=False)
 
 
+def parse_route_dest(token: str) -> ipaddress.IPv4Network | None:
+    """macOS prints 10.0.0.0/24 as 10/24 and a host as a bare address."""
+    if "/" in token:
+        left, plen = token.split("/", 1)
+        if not plen.isdigit():
+            return None
+        parts = left.split(".")
+        if not parts or any(not p.isdigit() for p in parts):
+            return None
+        while len(parts) < 4:
+            parts.append("0")
+        try:
+            return ipaddress.ip_network(".".join(parts) + "/" + plen, strict=False)
+        except ValueError:
+            return None
+    if is_ipv4(token):
+        return ipaddress.ip_network(token + "/32")
+    return None
+
+
+def routes_on(interface: str) -> list[ipaddress.IPv4Network]:
+    r = run(["netstat", "-rn", "-f", "inet"], check=False)
+    found = []
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 2 or parts[-1] != interface:
+            continue
+        net = parse_route_dest(parts[0])
+        if net is not None:
+            found.append(net)
+    return found
+
+
+def add_net_route(net: ipaddress.IPv4Network, interface: str) -> bool:
+    r = run(
+        ["route", "add", "-net", str(net.network_address), "-netmask", str(net.netmask),
+         "-interface", interface],
+        check=False,
+    )
+    if r.returncode == 0:
+        return True
+    err = (r.stderr or "") + (r.stdout or "")
+    if "exists" in err:
+        return True
+    print(f"[egress-tunnel] prefix route failed {net}: {err.strip()}")
+    return False
+
+
+def delete_net_route(net: ipaddress.IPv4Network, interface: str):
+    run(
+        ["route", "delete", "-net", str(net.network_address), "-netmask", str(net.netmask)],
+        check=False,
+    )
+
+
 def is_ipv4(s: str) -> bool:
     parts = s.split(".")
     return len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts)
@@ -343,8 +402,27 @@ class EgressTunnel:
         # somewhere else in the subnet.
         self.hub_ip = str(ipaddress.ip_network(self.hub_cidr, strict=False).network_address + 1)
         self.domains = config["routes"]["domains"]
+        self.prefix_nets = [
+            ipaddress.ip_network(p) for p in (config.get("routes", {}).get("prefixes") or [])
+        ]
+        self.learn_suffixes = [
+            s.lower().lstrip(".")
+            for s in (config.get("routes", {}).get("learn_prefix_suffixes") or [])
+        ]
         self.uapi = WireGuardUAPI(self.interface)
-        self.known_ips: dict[str, set[str]] = {}  # domain -> currently routed IPs
+        self.known_ips: dict[str, set[str]] = {}  # domain -> host routes outside pinned nets
+        self.resolved: dict[str, set[str]] = {}  # domain -> last successful answers
+        self.active_prefixes: list[ipaddress.IPv4Network] = []
+        self._learned_loaded = False
+        # ip -> monotonic time until which a dropped address keeps its route.
+        # Codex keeps the previous Cloudflare answer after DNS has moved on;
+        # deleting the route at that moment sends the live request out the
+        # home line. Addresses inside a pinned prefix never need this.
+        self.held_until: dict[str, float] = {}
+        # cidr -> unix time until a learned /24 (a Cloudflare block that is not
+        # in the published list yet) keeps its network route.
+        self.learned_until: dict[str, float] = {}
+        self._learned_path = Path(__file__).parent / "learned_prefixes.json"
         self.healthy = True
         self.consecutive_fail = 0
         self.consecutive_ok = 0
@@ -384,27 +462,171 @@ class EgressTunnel:
         else:
             self.refresh_routes()
 
+    def learns_prefix(self, domain: str) -> bool:
+        d = domain.lower().rstrip(".")
+        return any(d == s or d.endswith("." + s) for s in self.learn_suffixes)
+
+    def covered(self, ip: str) -> bool:
+        """True when a network route that is actually installed already carries this address."""
+        addr = ipaddress.ip_address(ip)
+        if any(addr in net for net in self.active_prefixes):
+            return True
+        return any(addr in ipaddress.ip_network(cidr) for cidr in self.learned_until)
+
+    def load_learned(self):
+        try:
+            raw = json.loads(self._learned_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return
+        now = time.time()
+        for cidr, until in raw.items():
+            try:
+                net = ipaddress.ip_network(cidr)
+                until = float(until)
+            except (ValueError, TypeError):
+                continue
+            if until > now:
+                self.learned_until[str(net)] = until
+
+    def save_learned(self):
+        self._learned_path.write_text(json.dumps(self.learned_until, indent=2) + "\n")
+
     def refresh_routes(self):
-        """Re-resolves domains, adds new IPs, removes ones that disappeared.
-        This is the actual fix for the Amnezia bug — no static IP pinning."""
+        """Re-resolves domains. Published CDN networks stay pinned; only
+        addresses outside them still get a host route.
+
+        An address is removed only when no domain in the list still resolves
+        to it. Cloudflare hands the same address to several hosts and then
+        takes it back from one of them; dropping the route on that one host
+        pulled it out from under the others, and their traffic left by the
+        home line. A pinned prefix never has this race: every address inside
+        it already points at the tunnel.
+        """
         ensure_endpoint_bypass_route(self.cfg["vps"]["endpoint"])
+        if not self._learned_loaded:
+            self.load_learned()
+            self._learned_loaded = True
+        new_map: dict[str, set[str]] = {}
         for domain in self.domains:
             current = resolve(domain)
             if not current:
+                # A transient lookup failure must not drop a live route.
+                new_map[domain] = set(self.resolved.get(domain, set()))
                 continue
-            previous = self.known_ips.get(domain, set())
-            for ip in current - previous:
-                add_host_route(ip, self.interface)
-            for ip in previous - current:
+            new_map[domain] = current
+
+        hc = self.cfg.get("healthcheck", {})
+        learn_len = int(hc.get("learn_prefix_len", 24))
+        learn_hold = float(hc.get("learn_prefix_hold_sec", 86400))
+        now_wall = time.time()
+        seen_learned: set[str] = set()
+        for domain, ips in new_map.items():
+            if not self.learns_prefix(domain):
+                continue
+            for ip in ips:
+                if any(ipaddress.ip_address(ip) in net for net in self.prefix_nets):
+                    continue
+                cidr = str(ipaddress.ip_network(f"{ip}/{learn_len}", strict=False))
+                seen_learned.add(cidr)
+        learned_added = []
+        for cidr in seen_learned:
+            if cidr not in self.learned_until:
+                learned_added.append(cidr)
+            self.learned_until[cidr] = now_wall + learn_hold
+        learned_expired = [c for c, until in self.learned_until.items() if until <= now_wall]
+        for cidr in learned_expired:
+            del self.learned_until[cidr]
+
+        present = set(routes_on(self.interface))
+        pinned_ok = 0
+        self.active_prefixes = []
+        for net in self.prefix_nets:
+            if net in present or add_net_route(net, self.interface):
+                self.active_prefixes.append(net)
+                if net not in present:
+                    pinned_ok += 1
+                    present.add(net)
+        for cidr in list(self.learned_until):
+            net = ipaddress.ip_network(cidr)
+            if net in present:
+                continue
+            if add_net_route(net, self.interface):
+                present.add(net)
+            else:
+                # The block did not pin; a host route is safer than a hole.
+                del self.learned_until[cidr]
+                learned_added = [c for c in learned_added if c != cidr]
+        for cidr in learned_expired:
+            delete_net_route(ipaddress.ip_network(cidr), self.interface)
+        if learned_added or learned_expired:
+            self.save_learned()
+
+        # A host route left over from before the prefix was pinned would still
+        # work, but it is the thing that flaps. Drop it once the network route
+        # covers the address. Never touch the tunnel's own address.
+        swept = 0
+        for net in list(present):
+            if net.prefixlen != 32:
+                continue
+            ip = str(net.network_address)
+            if ip == self.local_ip or not self.covered(ip):
+                continue
+            delete_host_route(ip, self.interface)
+            self.held_until.pop(ip, None)
+            swept += 1
+
+        needed: set[str] = set()
+        for ips in new_map.values():
+            for ip in ips:
+                if not self.covered(ip):
+                    needed.add(ip)
+        previous: set[str] = set()
+        for ips in self.known_ips.values():
+            previous |= ips
+        now = time.monotonic()
+        hold = float(hc.get("route_hold_sec", 1800))
+        for ip in needed:
+            self.held_until.pop(ip, None)
+        for ip in previous - needed:
+            if self.covered(ip):
                 delete_host_route(ip, self.interface)
-            self.known_ips[domain] = current
+                self.held_until.pop(ip, None)
+                continue
+            self.held_until.setdefault(ip, now + hold)
+        expired = [ip for ip, until in self.held_until.items() if until <= now]
+        for ip in needed - previous:
+            add_host_route(ip, self.interface)
+        for ip in expired:
+            delete_host_route(ip, self.interface)
+            del self.held_until[ip]
+        added = needed - previous
+        if pinned_ok or learned_added or learned_expired or swept or added or expired:
+            print(
+                f"[egress-tunnel] routes updated: prefixes +{pinned_ok}"
+                f" learned +{len(learned_added)} -{len(learned_expired)}"
+                f" swept {swept} hosts +{len(added)} -{len(expired)}"
+                f" holding {len(self.held_until)}"
+            )
+        self.resolved = new_map
+        self.known_ips = {
+            domain: {ip for ip in ips if not self.covered(ip)}
+            for domain, ips in new_map.items()
+        }
 
     def teardown_routes(self):
         """Removes routes on degradation — traffic falls back to the normal default route."""
         for ips in self.known_ips.values():
             for ip in ips:
                 delete_host_route(ip, self.interface)
+        for ip in self.held_until:
+            delete_host_route(ip, self.interface)
+        for net in self.prefix_nets:
+            delete_net_route(net, self.interface)
+        for cidr in self.learned_until:
+            delete_net_route(ipaddress.ip_network(cidr), self.interface)
         self.known_ips.clear()
+        self.held_until.clear()
+        self.active_prefixes = []
 
     def hub_reachable(self) -> bool:
         """Can we reach the hub's own address inside the tunnel?
@@ -507,6 +729,7 @@ class EgressTunnel:
             age = self.uapi.last_handshake_age()
             print(f"handshake age: {age:.1f}s" if age is not None else "handshake: never")
         print(f"deferring to another VPN: {self.deferring}")
+        print(f"pinned prefixes: {len(self.prefix_nets)}")
         print(f"routed domains: {list(self.known_ips.keys()) or '(none yet — run `up` first)'}")
 
 
