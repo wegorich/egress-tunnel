@@ -34,9 +34,8 @@ client:
   internal_ip: "10.0.0.2"   # a free IP in hub_cidr — agree on it before adding the peer
 
 routes:
-  # Domains that go through the tunnel. Re-resolved every
-  # healthcheck.resolve_interval_sec seconds — no static pinning, so IPs
-  # can't go stale.
+  # Names that must cross the hub. Addresses inside `prefixes` are already
+  # routed; anything else is re-resolved on healthcheck.resolve_interval_sec.
   domains:
     - api.anthropic.com
     - claude.ai
@@ -46,6 +45,128 @@ routes:
     - api.openai.com
     - auth.openai.com
     - chatgpt.com
+    # ChatGPT desktop and Codex call these beside chatgpt.com. A host missing
+    # here leaves by the home line and comes back 403.
+    - ab.chatgpt.com
+    - api.chatgpt.com
+    - ws.chatgpt.com
+    - realtime.chatgpt.com
+    - chat.openai.com
+    - platform.openai.com
+    - cdn.oaistatic.com
+    - persistent.oaistatic.com
+    - files.oaiusercontent.com
+
+    # Cursor. The login flow also passes through WorkOS.
+    - cursor.com
+    - www.cursor.com
+    - api.workos.com
+    - authenticate.cursor.sh
+    - authenticator.cursor.sh
+    - prod.authentication.cursor.sh
+    - authentication.cursor.sh
+    - api2.cursor.sh
+    - api3.cursor.sh
+    - api4.cursor.sh
+    - api5.cursor.sh
+    - agent.api5.cursor.sh
+    - agentn.api5.cursor.sh
+    - agent.us.api5.cursor.sh
+    - agentn.us.api5.cursor.sh
+    - agent.global.api5.cursor.sh
+    - agentn.global.api5.cursor.sh
+    - repo42.cursor.sh
+    - us-asia.gcpp.cursor.sh
+    - us-eu.gcpp.cursor.sh
+    - us-only.gcpp.cursor.sh
+    - adminportal42.cursor.sh
+    - marketplace.cursorapi.com
+    - cursor-cdn.com
+    - downloads.cursor.com
+    - anysphere-binaries.s3.us-east-1.amazonaws.com
+
+    # Grok and the shared xAI account/API endpoints.
+    - grok.com
+    - assets.grok.com
+    - accounts.x.ai
+    - api.x.ai
+
+    # Grok Bot hosted computers use dynamic subdomains. Resolving each region
+    # root captures the IP pool behind its wildcard DNS record.
+    - agent.cvm.dev
+    - dev.cursorvm.com
+    - dev1.cursorvm.com
+    - dev2.cursorvm.com
+    - dev3.cursorvm.com
+    - dev4.cursorvm.com
+    - dev5.cursorvm.com
+    - dev6.cursorvm.com
+    - dev9.cursorvm.com
+    - us1.cursorvm.com
+    - us1p.cursorvm.com
+    - us3.cursorvm.com
+    - us3p.cursorvm.com
+    - us4.cursorvm.com
+    - us4p.cursorvm.com
+    - us5.cursorvm.com
+    - us5p.cursorvm.com
+    - us6.cursorvm.com
+    - us6p.cursorvm.com
+    - us7.cursorvm.com
+    - us7p.cursorvm.com
+    - us8.cursorvm.com
+    - us9.cursorvm.com
+    - us10.cursorvm.com
+    - us11.cursorvm.com
+    - us12.cursorvm.com
+    - us13.cursorvm.com
+    - sdk-usw2-1.cursorvm.com
+
+  # Whole networks, not single addresses. Cloudflare rotates chatgpt, openai,
+  # cursor and grok inside these published ranges. A host route is already gone
+  # while the app still uses the previous answer, and that packet leaves by the
+  # home line. Pinning the network keeps the destination stable.
+  # Source: https://www.cloudflare.com/ips-v4 on 2026-10-07, plus two small
+  # Cloudflare blocks that are not in that list yet, plus Anthropic's own net.
+  prefixes:
+    - 173.245.48.0/20
+    - 103.21.244.0/22
+    - 103.22.200.0/22
+    - 103.31.4.0/22
+    - 141.101.64.0/18
+    - 108.162.192.0/18
+    - 190.93.240.0/20
+    - 188.114.96.0/20
+    - 197.234.240.0/22
+    - 198.41.128.0/17
+    - 162.158.0.0/15
+    - 104.16.0.0/13
+    - 104.24.0.0/14
+    - 172.64.0.0/13
+    - 131.0.72.0/22
+    - 8.6.112.0/24
+    - 8.47.69.0/24
+    - 160.79.104.0/23
+
+  # If one of these names resolves outside the list above, pin that whole /24
+  # and keep it for a day. cursorvm and S3 stay host routes: those addresses
+  # are dedicated machines, not a shared anycast pool.
+  learn_prefix_suffixes:
+    - chatgpt.com
+    - openai.com
+    - oaistatic.com
+    - oaiusercontent.com
+    - anthropic.com
+    - claude.ai
+    - claude.com
+    - claudeusercontent.com
+    - grok.com
+    - x.ai
+    - cursor.sh
+    - cursor.com
+    - cursorapi.com
+    - cursor-cdn.com
+    - workos.com
 
 healthcheck:
   probe_url: "https://api.anthropic.com/"
@@ -61,4 +182,8 @@ healthcheck:
   handshake_timeout_sec: 180
   fallback_after_failures: 3     # this many consecutive failures -> routes are removed
   recovery_after_successes: 3    # this many consecutive successes -> routes are restored
-  resolve_interval_sec: 300      # re-resolve domains every 5 minutes
+  resolve_interval_sec: 15       # learn a new block quickly; pinned nets do not depend on this
+  # Host routes only, for addresses outside the pinned networks.
+  route_hold_sec: 1800
+  learn_prefix_len: 24
+  learn_prefix_hold_sec: 86400

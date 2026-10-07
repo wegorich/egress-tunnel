@@ -1,4 +1,5 @@
 config.yaml
+learned_prefixes.json
 bin/
 *.log
 __pycache__/
